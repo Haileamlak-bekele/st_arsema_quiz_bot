@@ -5,53 +5,125 @@ from telegram.ext import (
 )
 import logging
 from pymongo import MongoClient
+from datetime import datetime
+import random
+from bson import ObjectId
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
+# ========== CONFIG ==========
+TOKEN = "8163769835:AAGJvltV1Pb4orjXbRooqXF0Dk18U5Ub7Rc"
 MONGO_URI = "mongodb+srv://quize_admin:mypassword123@cluster0.vispyak.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+
 client = MongoClient(MONGO_URI)
 db = client.quizdb
-questions_collection = db.questions
 
-QUESTION_TEXT, OPTION_A, OPTION_B, OPTION_C, OPTION_D, CORRECT_ANSWER = range(
-    6)
+quiz_questions_collection = db.quiz_questions
+practice_questions_collection = db.questions
+scores_collection = db.scores
 
-questions = []
-user_scores = {}
 admin_usernames = ['AmHBbe', 'yeabayras', 'Am21HB6']
 admin_ids = [1152440268, 7209995991]
-summary = "📊 *Quiz Results Summary:*\n\n"
 
+# Conversation states
+(
+    QUIZ_Q_TEXT, QUIZ_OPT_A, QUIZ_OPT_B, QUIZ_OPT_C, QUIZ_OPT_D, QUIZ_CORRECT,
+    PRAC_Q_TEXT, PRAC_OPT_A, PRAC_OPT_B, PRAC_OPT_C, PRAC_OPT_D, PRAC_CORRECT
+) = range(12)
 
+# In-memory caches
+quiz_questions = []
+practice_questions = []
+
+def load_quiz_questions():
+    global quiz_questions
+    quiz_questions.clear()
+    for q in quiz_questions_collection.find():
+        q.pop('_id', None)
+        quiz_questions.append(q)
+
+def load_practice_questions():
+    global practice_questions
+    practice_questions.clear()
+    for q in practice_questions_collection.find():
+        q.pop('_id', None)
+        practice_questions.append(q)
+
+def load_all_questions():
+    load_quiz_questions()
+    load_practice_questions()
+
+# ========== START & MODE SELECTION (improved UX) ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    keyboard = [[InlineKeyboardButton(
-        "Start Quiz 🧠", callback_data='start_quiz')]]
+    keyboard = []
+
+    if quiz_questions:
+        keyboard.append([InlineKeyboardButton("ኳዚ ጀምር 🧠", callback_data='start_quiz')])
+
+    # Prioritize Practice when no quiz is active
+    practice_btn = InlineKeyboardButton("መለማመድ ጀምር 📚", callback_data='start_practice')
+    if not quiz_questions:
+        keyboard.insert(0, [practice_btn])
+    else:
+        keyboard.append([practice_btn])
+
+    if not keyboard:
+        await update.message.reply_text(
+            "እንኳን ወደ ቅድስት አርሴማ የመጽሐፍ ቅዱስ ጥናት እራስን መፈተሻ bot በሰላም መጡ! 🙏\n\n"
+            "ገና ጥያቄ የለም። አስተዳዳሪ እንዲጨምር ይጠይቁ።"
+        )
+        return
+
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text(
-        "እንኳን ወደ ቅድስት አርሴማ የመጽሐፍ ቅዱስ ጥናት እራስን መፈተሻ bot በሰላም መጡ!!!",
-        reply_markup=reply_markup
-    )
 
+    text = "እንኳን ወደ ቅድስት አርሴማ የመጽሐፍ ቅዱስ ጥናት እራስን መፈተሻ bot በሰላም መጡ! 🙏\n\nየመማሪያ ሞድ ይምረጡ:"
+    
+    if not quiz_questions:
+        text += "\n\n(አሁን ንቁ ኳዚ የለም 😔 – መለማመድ ጀምር!)"
 
-async def quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(text, reply_markup=reply_markup)
+
+# ========== QUIZ MODE ==========
+async def start_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query:
+        await query.answer()
+
+    if not quiz_questions:
+        await (query.message if query else update.message).reply_text(
+            "አሁን ንቁ ኳዚ የለም 😔\n"
+            "መለማመድ (Practice) በመጠቀም ማወቅዎን ይቀጥሉ! 📚\n"
+            "/start በመጫን ይሞክሩ"
+        )
+        return
+
     user = update.effective_user
+    context.user_data.clear()
+
+    context.user_data["mode"] = "quiz"
     context.user_data["score"] = 0
     context.user_data["q_index"] = 0
+    context.user_data["user_id"] = user.id
     context.user_data["username"] = user.username or str(user.id)
+
+    await (query.message if query else update.message).reply_text("ኳዚ ጀምሯል! 🧠")
     await ask_question(update, context)
 
+# ... (rest of your code remains the same – ask_question, practice mode, answer handling, etc.)
 
+# Just replace the start and start_quiz functions above
+# The rest (end_quiz, leaderboard, admin commands, delete, etc.) stay exactly as in your last version
 async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     idx = context.user_data.get('q_index', 0)
 
-    if idx >= len(questions):
-        if update.callback_query:
-            await end_quiz(update.callback_query, context)
-        elif update.message:
-            await end_quiz(update.message, context)
+    if idx >= len(quiz_questions):
+        await end_quiz(update, context)
         return
 
-    q = questions[idx]
+    q = quiz_questions[idx]
     keyboard = [
         [InlineKeyboardButton(q['A'], callback_data="A")],
         [InlineKeyboardButton(q['B'], callback_data="B")],
@@ -60,203 +132,386 @@ async def ask_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    if update.message:
-        await update.message.reply_text(q["question"], reply_markup=reply_markup)
-    elif update.callback_query:
+    if update.callback_query:
         await update.callback_query.message.reply_text(q["question"], reply_markup=reply_markup)
+    else:
+        await update.message.reply_text(q["question"], reply_markup=reply_markup)
 
+# ========== PRACTICE MODE ==========
+async def start_practice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if query:
+        await query.answer()
 
+    if not practice_questions:
+        await (query.message if query else update.message).reply_text("No practice questions available yet.")
+        return
+
+    user = update.effective_user
+    context.user_data.clear()
+
+    context.user_data["mode"] = "practice"
+    context.user_data["user_id"] = user.id
+    context.user_data["username"] = user.username or str(user.id)
+
+    await ask_practice_question(update, context)
+
+async def ask_practice_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not practice_questions:
+        return
+
+    q = random.choice(practice_questions)
+    context.user_data["current_q"] = q
+
+    keyboard = [
+        [InlineKeyboardButton(q['A'], callback_data="A")],
+        [InlineKeyboardButton(q['B'], callback_data="B")],
+        [InlineKeyboardButton(q['C'], callback_data="C")],
+        [InlineKeyboardButton(q['D'], callback_data="D")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    message = update.callback_query.message if update.callback_query else update.message
+    await message.reply_text(q["question"], reply_markup=reply_markup)
+
+# ========== ANSWER HANDLING ==========
 async def handle_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    username = context.user_data["username"]
-    idx = context.user_data["q_index"]
-    selected = query.data
-    correct = questions[idx]["correct"]
+    mode = context.user_data.get("mode", "quiz")
 
-    if selected == correct:
-        context.user_data["score"] += 1
+    if mode == "practice":
+        selected = query.data
+        q = context.user_data.get("current_q")
+        if not q:
+            await query.edit_message_text("Session expired. Use /start")
+            return
 
-    context.user_data["q_index"] += 1
-    await ask_question(update, context)
+        correct = q["correct"]
+        is_correct = selected == correct
 
+        feedback = f"✅ Correct! The answer is {correct}." if is_correct else f"❌ Wrong. The correct answer is {correct}."
 
+        # practice_logs_collection removed → no logging here anymore
+
+        keyboard = [
+            [InlineKeyboardButton("Next Question ➡️", callback_data='next_practice')],
+            [InlineKeyboardButton("Stop Practice 🛑", callback_data='stop_practice')]
+        ]
+        await query.edit_message_text(feedback, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    else:  # quiz mode
+        idx = context.user_data.get("q_index", 0)
+        selected = query.data
+        correct = quiz_questions[idx]["correct"]
+
+        if selected == correct:
+            context.user_data["score"] = context.user_data.get("score", 0) + 1
+
+        context.user_data["q_index"] = idx + 1
+        await ask_question(update, context)
+
+# ========== PRACTICE CONTROLS ==========
+async def next_practice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    await ask_practice_question(update, context)
+
+async def stop_practice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.callback_query.answer()
+    context.user_data.clear()
+    await update.callback_query.edit_message_text(
+        "Practice session ended.\n\nUse /start to choose Quiz or Practice again."
+    )
+
+# ========== QUIZ END & LEADERBOARD ==========
 async def end_quiz(update, context: ContextTypes.DEFAULT_TYPE):
-    username = context.user_data["username"]
-    score = context.user_data["score"]
-    total = len(questions)
-    user_scores[username] = score
+    user_id = context.user_data.get("user_id")
+    username = context.user_data.get("username")
+    score = context.user_data.get("score", 0)
+    total = len(quiz_questions)
 
-    text = f"{username}, your score is {score}/{total}\n\n🏆 Ranking:"
-    sorted_scores = sorted(user_scores.items(),
-                           key=lambda x: x[1], reverse=True)
-    for rank, (user, s) in enumerate(sorted_scores, 1):
-        text += f"\n{rank}. {user}: {s}"
+    if user_id:
+        try:
+            scores_collection.update_one(
+                {"user_id": user_id},
+                {"$set": {
+                    "username": username,
+                    "score": score,
+                    "total": total,
+                    "timestamp": datetime.utcnow()
+                }},
+                upsert=True
+            )
+        except Exception as e:
+            logging.error(f"Failed to save score: {e}")
 
-    if hasattr(update, 'edit_text'):
-        await update.edit_text(text)
-    elif hasattr(update, 'message'):
-        await update.message.reply_text(text)
+    top_scores = list(scores_collection.find().sort("score", -1).limit(10))
+    text = f"Your score: **{score}/{total}**\n\n🏆 Top 10:\n"
+    if not top_scores:
+        text += "No scores yet."
+    else:
+        for rank, doc in enumerate(top_scores, 1):
+            text += f"{rank}. {doc['username']}: {doc['score']}/{doc['total']}\n"
 
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, parse_mode="Markdown")
+    else:
+        await update.effective_message.reply_text(text, parse_mode="Markdown")
+
+    # Notify admins
+    admin_text = f"📈 {username} scored {score}/{total} in quiz"
     for admin_id in admin_ids:
         try:
-            await context.bot.send_message(chat_id=admin_id, text=f"📈 {username} scored {score}/{total}\n {sorted_scores}")
-        except Exception as e:
-            logging.warning(f"Couldn't send to admin {admin_id}: {e}")
+            await context.bot.send_message(admin_id, admin_text)
+        except:
+            pass
 
+async def leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    top = list(scores_collection.find().sort("score", -1).limit(10))
+    if not top:
+        await update.message.reply_text("No scores yet.")
+        return
 
-async def add_question_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = "🏆 **Quiz Leaderboard**\n\n"
+    for rank, doc in enumerate(top, 1):
+        text += f"{rank}. {doc['username']}: {doc['score']}/{doc['total']}\n"
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+ #clear leaderboard command (admin only)
+async def clear_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.username not in admin_usernames:
-        await update.message.reply_text(" You are not authorized to add questions.")
+        await update.message.reply_text("Not authorized.")
+        return
+
+    scores_collection.delete_many({})
+    await update.message.reply_text("✅ Leaderboard cleared.")   
+
+# ========== ADMIN: END CURRENT QUIZ ==========
+async def end_quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.username not in admin_usernames:
+        await update.message.reply_text("Not authorized.")
+        return
+
+    if not quiz_questions:
+        await update.message.reply_text("No active quiz questions to end.")
+        return
+
+    count = quiz_questions_collection.count_documents({})
+    if count > 0:
+        docs = list(quiz_questions_collection.find())
+        practice_questions_collection.insert_many(docs)
+        quiz_questions_collection.delete_many({})
+        load_all_questions()
+
+        await update.message.reply_text(
+            f"✅ Quiz ended!\n{len(docs)} questions moved to practice pool."
+        )
+    else:
+        await update.message.reply_text("No questions to move.")
+
+# ========== ADMIN: ADD QUESTIONS ==========
+async def add_quiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.username not in admin_usernames:
+        await update.message.reply_text("Not authorized.")
         return ConversationHandler.END
 
-    await update.message.reply_text("📝 hi admin, please Send the question text:")
-    return QUESTION_TEXT
+    context.user_data["adding_quiz"] = True
+    await update.message.reply_text("📝 Send the **QUIZ** question text:")
+    return QUIZ_Q_TEXT
 
+async def add_practice_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.username not in admin_usernames:
+        await update.message.reply_text("Not authorized.")
+        return ConversationHandler.END
+
+    context.user_data["adding_quiz"] = False
+    await update.message.reply_text("📝 Send the **PRACTICE** question text:")
+    return PRAC_Q_TEXT
 
 async def receive_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["new_q"] = {"question": update.message.text}
     await update.message.reply_text("Send option A:")
-    return OPTION_A
-
+    return QUIZ_OPT_A if context.user_data.get("adding_quiz") else PRAC_OPT_A
 
 async def receive_option_a(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["new_q"]["A"] = update.message.text
     await update.message.reply_text("Send option B:")
-    return OPTION_B
-
+    return QUIZ_OPT_B if context.user_data.get("adding_quiz") else PRAC_OPT_B
 
 async def receive_option_b(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["new_q"]["B"] = update.message.text
     await update.message.reply_text("Send option C:")
-    return OPTION_C
-
+    return QUIZ_OPT_C if context.user_data.get("adding_quiz") else PRAC_OPT_C
 
 async def receive_option_c(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["new_q"]["C"] = update.message.text
     await update.message.reply_text("Send option D:")
-    return OPTION_D
-
+    return QUIZ_OPT_D if context.user_data.get("adding_quiz") else PRAC_OPT_D
 
 async def receive_option_d(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["new_q"]["D"] = update.message.text
     await update.message.reply_text("Which is the correct answer? (A, B, C, or D)")
-    return CORRECT_ANSWER
+    return QUIZ_CORRECT if context.user_data.get("adding_quiz") else PRAC_CORRECT
 
-
-async def receive_correct(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    correct = update.message.text.upper()
+async def receive_correct_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    correct = update.message.text.strip().upper()
     if correct not in ['A', 'B', 'C', 'D']:
-        await update.message.reply_text("Invalid. Please enter A, B, C, or D.")
-        return CORRECT_ANSWER
+        await update.message.reply_text("Please enter A, B, C, or D.")
+        return QUIZ_CORRECT
 
     context.user_data["new_q"]["correct"] = correct
-    questions.append(context.user_data["new_q"])
-
     try:
-        questions_collection.insert_one(context.user_data["new_q"])
-        await update.message.reply_text("✅ Question added successfully and saved to database!")
+        quiz_questions_collection.insert_one(context.user_data["new_q"])
+        load_quiz_questions()
+        await update.message.reply_text("✅ Quiz question added! (temporary until /endquiz)")
     except Exception as e:
-        await update.message.reply_text(f"⚠️ Question added locally, but failed to save to database: {e}")
+        await update.message.reply_text(f"Error saving: {e}")
 
+    context.user_data.pop("new_q", None)
+    context.user_data.pop("adding_quiz", None)
     return ConversationHandler.END
 
+async def receive_correct_practice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    correct = update.message.text.strip().upper()
+    if correct not in ['A', 'B', 'C', 'D']:
+        await update.message.reply_text("Please enter A, B, C, or D.")
+        return PRAC_CORRECT
+
+    context.user_data["new_q"]["correct"] = correct
+    try:
+        practice_questions_collection.insert_one(context.user_data["new_q"])
+        load_practice_questions()
+        await update.message.reply_text("✅ Practice question added permanently!")
+    except Exception as e:
+        await update.message.reply_text(f"Error saving: {e}")
+
+    context.user_data.pop("new_q", None)
+    return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Question creation canceled.")
+    await update.message.reply_text("❌ Canceled.")
+    context.user_data.clear()
     return ConversationHandler.END
 
-
-def load_questions_from_db():
-    questions.clear()
-    for q in questions_collection.find():
-        q.pop('_id', None)
-        questions.append(q)
-
-# ✅ NEW FUNCTION: Admin deletes question
-
-
+# ========== ADMIN DELETE (quiz questions) ==========
 async def delete_question_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.username not in admin_usernames:
-        await update.message.reply_text("You are not authorized to delete questions.")
+        await update.message.reply_text("Not authorized.")
         return
 
-    all_qs = list(questions_collection.find())
+    all_qs = list(quiz_questions_collection.find())
     if not all_qs:
-        await update.message.reply_text("No questions found in the database.")
+        await update.message.reply_text("No quiz questions found.")
         return
 
     for q in all_qs:
-        q_id = str(q['_id'])
-        text = f"❓ {q['question']}\nA. {q['A']}\nB. {q['B']}\nC. {q['C']}\nD. {q['D']}\n✅ {q['correct']}"
-        keyboard = InlineKeyboardMarkup(
-            [[InlineKeyboardButton("❌ Delete", callback_data=f"delete_{q_id}")]])
-        await update.message.reply_text(text, reply_markup=keyboard)
+        text = f"❓ {q['question']}\nA: {q.get('A','')}\nB: {q.get('B','')}\nC: {q.get('C','')}\nD: {q.get('D','')}\nCorrect: {q.get('correct','')}"
+        keyboard = [[InlineKeyboardButton("❌ Delete", callback_data=f"delete_{str(q['_id'])}")]]
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
+ #delete practice question
+async def delete_practice_question_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.username not in admin_usernames:
+        await update.message.reply_text("Not authorized.")
+        return
+
+    all_qs = list(practice_questions_collection.find())
+    if not all_qs:
+        await update.message.reply_text("No practice questions found.")
+        return
+
+    for q in all_qs:
+        text = f"❓ {q['question']}\nA: {q.get('A','')}\nB: {q.get('B','')}\nC: {q.get('C','')}\nD: {q.get('D','')}\nCorrect: {q.get('correct','')}"
+        keyboard = [[InlineKeyboardButton("❌ Delete", callback_data=f"delete_practice_{str(q['_id'])}")]]
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))       
 
 async def handle_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
     data = query.data
 
-    if data.startswith("delete_"):
-        q_id = data.split("_", 1)[1]
-        from bson import ObjectId
-        result = questions_collection.delete_one({"_id": ObjectId(q_id)})
-        if result.deleted_count == 1:
-            await query.edit_message_text("✅ Question deleted from database.")
-            load_questions_from_db()  # reload local copy
+    try:
+        if data.startswith("delete_practice_"):
+            # Extract ID after "delete_practice_"
+            q_id = data.split("delete_practice_", 1)[1]
+            result = practice_questions_collection.delete_one({"_id": ObjectId(q_id)})
+            if result.deleted_count == 1:
+                load_practice_questions()
+                await query.edit_message_text("✅ Practice question deleted successfully.")
+            else:
+                await query.edit_message_text("Failed to delete practice question (question not found).")
+
+        elif data.startswith("delete_"):
+            # Extract ID after "delete_"
+            q_id = data.split("delete_", 1)[1]
+            result = quiz_questions_collection.delete_one({"_id": ObjectId(q_id)})
+            if result.deleted_count == 1:
+                load_quiz_questions()
+                await query.edit_message_text("✅ Quiz question deleted successfully.")
+            else:
+                await query.edit_message_text("Failed to delete quiz question (question not found).")
+
         else:
-            await query.edit_message_text("⚠️ Failed to delete question.")
+            await query.edit_message_text("Invalid delete request.")
 
-
-async def myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Works for messages and callback queries
-    user = update.effective_user or (
-        update.callback_query.from_user if update.callback_query else None)
-    if not user:
-        await update.message.reply_text("Could not determine user.")
-        return
-    uid = user.id
-    uname = user.username or "no username"
-    await (update.message.reply_text if getattr(update, "message", None) else update.callback_query.message.reply_text)(
-        f"Your ID: {uid}\nUsername: @{uname}"
-    )
-
-
+    except Exception as e:
+        logging.error(f"Delete error: {e}")
+        await query.edit_message_text(f"Error during deletion: {str(e)}")
+   
+# ========== MAIN ==========
 def main():
-    load_questions_from_db()
-    app = Application.builder().token(
-        "8163769835:AAGJvltV1Pb4orjXbRooqXF0Dk18U5Ub7Rc").build()
+    load_all_questions()
 
-    app.add_handler(CommandHandler("myid", myid))
+    app = Application.builder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(
-        lambda u, c: quiz(u, c), pattern="^start_quiz$"))
-    app.add_handler(CallbackQueryHandler(handle_answer, pattern="^[ABCD]$"))
-    app.add_handler(CommandHandler("deletequestion", delete_question_command))
-    app.add_handler(CallbackQueryHandler(
-        handle_delete_callback, pattern="^delete_"))
+    app.add_handler(CommandHandler("leaderboard", leaderboard))
+    app.add_handler(CommandHandler("clearleaderboard", clear_leaderboard))
+    app.add_handler(CommandHandler("endquiz", end_quiz_command))
 
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("addquestion", add_question_start)],
+    app.add_handler(CallbackQueryHandler(start_quiz, pattern="^start_quiz$"))
+    app.add_handler(CallbackQueryHandler(start_practice, pattern="^start_practice$"))
+    app.add_handler(CallbackQueryHandler(handle_answer, pattern="^[ABCD]$"))
+    app.add_handler(CallbackQueryHandler(next_practice, pattern="^next_practice$"))
+    app.add_handler(CallbackQueryHandler(stop_practice, pattern="^stop_practice$"))
+
+    app.add_handler(CommandHandler("deletequizquestion", delete_question_command))
+    app.add_handler(CommandHandler("deletepracticequestion", delete_practice_question_command))
+    app.add_handler(CallbackQueryHandler(handle_delete_callback, pattern="^(delete_|delete_practice_)"))
+
+    quiz_conv = ConversationHandler(
+        entry_points=[CommandHandler("addquiz", add_quiz_start)],
         states={
-            QUESTION_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_question)],
-            OPTION_A: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_option_a)],
-            OPTION_B: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_option_b)],
-            OPTION_C: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_option_c)],
-            OPTION_D: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_option_d)],
-            CORRECT_ANSWER: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_correct)],
+            QUIZ_Q_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_question)],
+            QUIZ_OPT_A: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_option_a)],
+            QUIZ_OPT_B: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_option_b)],
+            QUIZ_OPT_C: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_option_c)],
+            QUIZ_OPT_D: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_option_d)],
+            QUIZ_CORRECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_correct_quiz)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
 
-    app.add_handler(conv_handler)
-    print("🤖 Bot is running...")
-    app.run_polling()
+    practice_conv = ConversationHandler(
+        entry_points=[CommandHandler("addpractice", add_practice_start)],
+        states={
+            PRAC_Q_TEXT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_question)],
+            PRAC_OPT_A: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_option_a)],
+            PRAC_OPT_B: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_option_b)],
+            PRAC_OPT_C: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_option_c)],
+            PRAC_OPT_D: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_option_d)],
+            PRAC_CORRECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_correct_practice)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
 
+    app.add_handler(quiz_conv)
+    app.add_handler(practice_conv)
+
+    print("Bot is running...")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
