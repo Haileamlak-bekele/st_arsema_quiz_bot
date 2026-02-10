@@ -61,7 +61,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = []
 
     if quiz_questions:
-        keyboard.append([InlineKeyboardButton("ኳዚ ጀምር 🧠", callback_data='start_quiz')])
+        keyboard.append([InlineKeyboardButton("ፈተና ጀምር 🧠", callback_data='start_quiz')])
 
     # Prioritize Practice when no quiz is active
     practice_btn = InlineKeyboardButton("መለማመድ ጀምር 📚", callback_data='start_practice')
@@ -82,7 +82,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "እንኳን ወደ ቅድስት አርሴማ የመጽሐፍ ቅዱስ ጥናት እራስን መፈተሻ bot በሰላም መጡ! 🙏\n\nየመማሪያ ሞድ ይምረጡ:"
     
     if not quiz_questions:
-        text += "\n\n(አሁን ንቁ ኳዚ የለም 😔 – መለማመድ ጀምር!)"
+        text += "\n\n(አሁን ንቁ ፈተና የለም 😔 – መለማመድ ጀምር!)"
 
     await update.message.reply_text(text, reply_markup=reply_markup)
 
