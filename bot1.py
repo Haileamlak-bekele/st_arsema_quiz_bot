@@ -94,7 +94,7 @@ async def start_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not quiz_questions:
         await (query.message if query else update.message).reply_text(
-            "አሁን ንቁ ኳዚ የለም 😔\n"
+            "አሁን ንቁ ፈተና የለም 😔\n"
             "መለማመድ (Practice) በመጠቀም ማወቅዎን ይቀጥሉ! 📚\n"
             "/start በመጫን ይሞክሩ"
         )
