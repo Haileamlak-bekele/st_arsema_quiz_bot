@@ -15,8 +15,7 @@ logging.basicConfig(
 )
 
 # ========== CONFIG ==========
-TOKEN = "8163769835:AAGJvltV1Pb4orjXbRooqXF0Dk18U5Ub7Rc"
-MONGO_URI = "mongodb+srv://quize_admin:mypassword123@cluster0.vispyak.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+
 
 client = MongoClient(MONGO_URI)
 db = client.quizdb
